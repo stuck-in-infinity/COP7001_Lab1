@@ -201,6 +201,10 @@ int main() {
         
         bool has_pipe = (cmd2 != cmd1);
         
+        cerr << "[DEBUG] Input: " << trimmed << "\n";
+        cerr << "[DEBUG] Has pipe: " << (has_pipe ? "YES" : "NO") << "\n";
+        cerr << "[DEBUG] Background: " << (background ? "YES" : "NO") << "\n";
+        
         // ============ BUILT-INS ============
         
         if (toks[0] == "exit") {
