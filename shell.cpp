@@ -111,6 +111,29 @@ string validate_redirection(const vector<string> &tokens) {
     return "";
 }
 
+pair<vector<string>, vector<string>> split_pipe(const vector<string> &tokens) {
+    vector<string> cmd1, cmd2;
+    bool found_pipe = false;
+    
+    for (size_t i = 0; i < tokens.size(); i++) {
+        if (tokens[i] == "|") {
+            if (found_pipe) {
+                // Multiple pipes not supported yet
+                cerr << "Error: Multiple pipes not supported\n";
+                return make_pair(vector<string>(), vector<string>());
+            }
+            found_pipe = true;
+            continue;
+        }
+        
+        if (!found_pipe)
+            cmd1.push_back(tokens[i]);
+        else
+            cmd2.push_back(tokens[i]);
+    }
+    
+    return make_pair(cmd1, cmd2);
+}
 // =============================================================
 
 int main() {
@@ -163,7 +186,20 @@ int main() {
             cerr << redir_error << "\n";
             continue;
         }
+        // ============ CHECK FOR PIPE ============
+        auto [cmd1, cmd2] = split_pipe(toks);
         
+        // If split failed (multiple pipes), continue
+        if (cmd1.empty() && !toks.empty()) {
+            continue;
+        }
+        
+        // cmd2 empty means no pipe, single command
+        if (cmd2.empty()) {
+            cmd2 = cmd1;  // single command mode, just use cmd1
+        }
+        
+        bool has_pipe = (cmd2 != cmd1);
         // ============ BUILT-INS ============
         
         if (toks[0] == "exit") {
@@ -271,6 +307,8 @@ int main() {
         }
     }
     
+    
     return 0;
 }
+
 
