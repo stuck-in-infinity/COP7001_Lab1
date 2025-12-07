@@ -228,86 +228,210 @@ int main() {
             continue;
         }
         
-        // ============ PARSE REDIRECTION ============
-        
-        string input_file = "";
-        string output_file = "";
-        vector<string> cleaned;
-        
-        for (int i = 0; i < (int)toks.size(); i++) {
-            if (toks[i] == "<" && i + 1 < (int)toks.size()) {
-                input_file = toks[i + 1];
-                i++;
-            } else if (toks[i] == ">" && i + 1 < (int)toks.size()) {
-                output_file = toks[i + 1];
-                i++;
+        if (!has_pipe) {
+            string input_file = "";
+            string output_file = "";
+            vector<string> cleaned;
+            
+            for (int i = 0; i < (int)cmd1.size(); i++) {
+                if (cmd1[i] == "<" && i + 1 < (int)cmd1.size()) {
+                    input_file = cmd1[i + 1];
+                    i++;
+                } else if (cmd1[i] == ">" && i + 1 < (int)cmd1.size()) {
+                    output_file = cmd1[i + 1];
+                    i++;
+                } else {
+                    cleaned.push_back(cmd1[i]);
+                }
+            }
+            
+            cmd1 = cleaned;
+            if (cmd1.empty())
+                continue;
+            
+            vector<char*> argv;
+            vector<string> storage;
+            storage.reserve(cmd1.size());
+            for (auto &s : cmd1)
+                storage.push_back(s);
+            for (auto &s : storage)
+                argv.push_back(&s[0]);
+            argv.push_back(nullptr);
+            
+            pid_t pid = fork();
+            if (pid < 0) {
+                perror("fork");
+                continue;
+            }
+            
+            if (pid == 0) {
+                signal(SIGINT, SIG_DFL);
+                
+                if (!input_file.empty()) {
+                    int fd = open(input_file.c_str(), O_RDONLY);
+                    if (fd < 0) {
+                        perror("input redirection");
+                        _exit(1);
+                    }
+                    dup2(fd, STDIN_FILENO);
+                    close(fd);
+                }
+                
+                if (!output_file.empty()) {
+                    int fd = open(output_file.c_str(),
+                                  O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    if (fd < 0) {
+                        perror("output redirection");
+                        _exit(1);
+                    }
+                    dup2(fd, STDOUT_FILENO);
+                    close(fd);
+                }
+                
+                execvp(argv[0], argv.data());
+                perror("execvp");
+                _exit(1);
+                
             } else {
-                cleaned.push_back(toks[i]);
-            }
-        }
-        
-        toks = cleaned;
-        if (toks.empty())
-            continue;
-        
-        // Prepare argv for execvp
-        vector<char*> argv;
-        vector<string> storage;
-        storage.reserve(toks.size());
-        for (auto &s : toks)
-            storage.push_back(s);
-        for (auto &s : storage)
-            argv.push_back(&s[0]);
-        argv.push_back(nullptr);
-        
-        // ============ FORK AND EXECUTE ============
-        
-        pid_t pid = fork();
-        if (pid < 0) {
-            perror("fork");
-            continue;
-        }
-        
-        if (pid == 0) {
-            // CHILD PROCESS
-            signal(SIGINT, SIG_DFL);  // child should die on Ctrl-C
-            
-            // ----- INPUT REDIRECTION -----
-            if (!input_file.empty()) {
-                int fd = open(input_file.c_str(), O_RDONLY);
-                if (fd < 0) {
-                    perror("input redirection");
-                    _exit(1);
+                if (!background) {
+                    int status = 0;
+                    waitpid(pid, &status, 0);
+                } else {
+                    cout << "[background pid " << pid << "]\n";
                 }
-                dup2(fd, STDIN_FILENO);
-                close(fd);
             }
-            
-            // ----- OUTPUT REDIRECTION -----
-            if (!output_file.empty()) {
-                int fd = open(output_file.c_str(),
-                              O_WRONLY | O_CREAT | O_TRUNC,
-                              0644);
-                if (fd < 0) {
-                    perror("output redirection");
-                    _exit(1);
-                }
-                dup2(fd, STDOUT_FILENO);
-                close(fd);
-            }
-            
-            // execute command
-            execvp(argv[0], argv.data());
-            perror("execvp");
-            _exit(1);
             
         } else {
-            // PARENT PROCESS
+            if (cmd1.empty() || cmd2.empty()) {
+                cerr << "Error: Pipe syntax requires two commands\n";
+                continue;
+            }
+            
+            int fds[2];
+            if (pipe(fds) < 0) {
+                perror("pipe");
+                continue;
+            }
+            
+            string input_file = "";
+            vector<string> cmd1_clean;
+            for (int i = 0; i < (int)cmd1.size(); i++) {
+                if (cmd1[i] == "<" && i + 1 < (int)cmd1.size()) {
+                    input_file = cmd1[i + 1];
+                    i++;
+                } else if (cmd1[i] != ">" && cmd1[i] != "|") {
+                    cmd1_clean.push_back(cmd1[i]);
+                }
+            }
+            cmd1 = cmd1_clean;
+            
+            string output_file = "";
+            vector<string> cmd2_clean;
+            for (int i = 0; i < (int)cmd2.size(); i++) {
+                if (cmd2[i] == ">" && i + 1 < (int)cmd2.size()) {
+                    output_file = cmd2[i + 1];
+                    i++;
+                } else if (cmd2[i] != "<" && cmd2[i] != "|") {
+                    cmd2_clean.push_back(cmd2[i]);
+                }
+            }
+            cmd2 = cmd2_clean;
+            
+            if (cmd1.empty() || cmd2.empty()) {
+                cerr << "Error: Pipe commands cannot be empty\n";
+                close(fds[0]);
+                close(fds[1]);
+                continue;
+            }
+            
+            pid_t pid1 = fork();
+            if (pid1 < 0) {
+                perror("fork");
+                close(fds[0]);
+                close(fds[1]);
+                continue;
+            }
+            
+            if (pid1 == 0) {
+                signal(SIGINT, SIG_DFL);
+                
+                dup2(fds[1], STDOUT_FILENO);
+                close(fds[0]);
+                close(fds[1]);
+                
+                if (!input_file.empty()) {
+                    int fd = open(input_file.c_str(), O_RDONLY);
+                    if (fd < 0) {
+                        perror("input redirection");
+                        _exit(1);
+                    }
+                    dup2(fd, STDIN_FILENO);
+                    close(fd);
+                }
+                
+                vector<char*> argv;
+                vector<string> storage;
+                storage.reserve(cmd1.size());
+                for (auto &s : cmd1)
+                    storage.push_back(s);
+                for (auto &s : storage)
+                    argv.push_back(&s[0]);
+                argv.push_back(nullptr);
+                
+                execvp(argv[0], argv.data());
+                perror("execvp");
+                _exit(1);
+            }
+            
+            pid_t pid2 = fork();
+            if (pid2 < 0) {
+                perror("fork");
+                close(fds[0]);
+                close(fds[1]);
+                continue;
+            }
+            
+            if (pid2 == 0) {
+                signal(SIGINT, SIG_DFL);
+                
+                dup2(fds[0], STDIN_FILENO);
+                close(fds[0]);
+                close(fds[1]);
+                
+                if (!output_file.empty()) {
+                    int fd = open(output_file.c_str(),
+                                  O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    if (fd < 0) {
+                        perror("output redirection");
+                        _exit(1);
+                    }
+                    dup2(fd, STDOUT_FILENO);
+                    close(fd);
+                }
+                
+                vector<char*> argv;
+                vector<string> storage;
+                storage.reserve(cmd2.size());
+                for (auto &s : cmd2)
+                    storage.push_back(s);
+                for (auto &s : storage)
+                    argv.push_back(&s[0]);
+                argv.push_back(nullptr);
+                
+                execvp(argv[0], argv.data());
+                perror("execvp");
+                _exit(1);
+            }
+            
+            close(fds[0]);
+            close(fds[1]);
+            
             if (!background) {
-                int status = 0;
-                waitpid(pid, &status, 0);
+                int status1, status2;
+                waitpid(pid1, &status1, 0);
+                waitpid(pid2, &status2, 0);
             } else {
-                cout << "[background pid " << pid << "]\n";
+                cout << "[background pipe pids " << pid1 << " " << pid2 << "]\n";
             }
         }
     }
