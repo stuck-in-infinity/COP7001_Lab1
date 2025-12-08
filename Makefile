@@ -1,16 +1,16 @@
 # Makefile
 CXX = g++
 CXXFLAGS = -std=c++17 -Wall -Wextra -g
-SRC = src/shell.cpp
+SRC = shell.cpp
 BIN = shell
 
 all: $(BIN)
 
 $(BIN): $(SRC)
-	mkdir -p bin
-	$(CXX) $(CXXFLAGS) -o bin/$(BIN) $(SRC)
+	
+	$(CXX) $(CXXFLAGS) -o $(BIN) $(SRC)
 
 clean:
-	rm -rf bin
+	rm -rf shell
 
 .PHONY: all clean
