@@ -1,6 +1,3 @@
-// src/shell.cpp
-// Mini Shell: Commands, Quoting, Background, Signals, Redirection (<, >)
-
 #include <iostream>
 #include <string>
 #include <vector>
@@ -17,337 +14,501 @@
 
 using namespace std;
 
-// ============== SIGNAL HANDLERS ==============
+// SIGNAL HANDLER
 
-// Reaps zombie processes asynchronously
-void sigchld_handler(int sig) {
-    int saved_errno = errno;
-    while (waitpid(-1, nullptr, WNOHANG) > 0);
-    errno = saved_errno;
+void sigchld_handler(int)
+{
+    int saved = errno;
+    while (true)
+    {
+        int status;
+        pid_t pid = waitpid(-1, &status, WNOHANG);
+        if (pid <= 0)
+            break;
+    }
+    errno = saved;
 }
 
-void setup_signal_handlers() {
+void setup_signal_handlers()
+{
     struct sigaction sa;
     sa.sa_handler = sigchld_handler;
     sigemptyset(&sa.sa_mask);
     sa.sa_flags = SA_RESTART;
     sigaction(SIGCHLD, &sa, nullptr);
-    
-    // Shell ignores Ctrl-C; child processes will default it back
+
+    // Shell should ignore Ctrl-C
     signal(SIGINT, SIG_IGN);
 }
 
-// ============== TOKENIZER ==============
+// TOKENIZER WITH ERROR HANDLING
 
-// Splits line into tokens, handling quotes and special characters (<, >, |, &)
-pair<vector<string>, string> tokenize(const string &line) {
+pair<vector<string>, string> tokenize(const string &line)
+{
     vector<string> tokens;
     string cur;
     bool in_quote = false;
-    
-    for (size_t i = 0; i < line.size(); i++) {
-        char c = line[i];
-        
-        if (c == '"') {
-            in_quote =!in_quote;
-            continue;
-        }
-        
-        if (in_quote) {
-            cur.push_back(c);
-            continue;
-        }
-        
-        // Handle special delimiters outside quotes
-        if (c == '<' |
 
-| c == '>' |
-| c == '|' |
-| c == '&') {
-            if (!cur.empty()) {
+    for (size_t i = 0; i < line.size(); i++)
+    {
+        char c = line[i];
+
+        if (c == '"')
+        {
+            in_quote = !in_quote;
+            continue;
+        }
+
+        if (!in_quote && isspace((unsigned char)c))
+        {
+            if (!cur.empty())
+            {
                 tokens.push_back(cur);
                 cur.clear();
             }
-            string op(1, c);
-            tokens.push_back(op);
-        } else if (isspace((unsigned char)c)) {
-            if (!cur.empty()) {
-                tokens.push_back(cur);
-                cur.clear();
-            }
-        } else {
+        }
+        else
+        {
             cur.push_back(c);
         }
     }
-    
+
     if (!cur.empty())
         tokens.push_back(cur);
-    
-    if (in_quote) {
-        return { {}, "Error: Unterminated quote" };
+
+    if (in_quote)
+    {
+        return make_pair(vector<string>(), "Error: Unterminated quote");
     }
-    
-    return { tokens, "" };
+
+    return make_pair(tokens, "");
 }
 
-// ============== VALIDATION ==============
+// REDIRECTION VALIDATION
+bool isOperator(const string &s)
+{
+    return (s == "<" || s == ">" || s == "|" || s == "&");
+}
 
-string validate_redirection(const vector<string> &tokens) {
-    for (size_t i = 0; i < tokens.size(); i++) {
-        if (tokens[i] == "<" |
-
-| tokens[i] == ">") {
-            if (i + 1 >= tokens.size()) {
+string validate_redirection(const vector<string> &tokens)
+{
+    for (size_t i = 0; i < tokens.size(); i++)
+    {
+        if (tokens[i] == "<" || tokens[i] == ">")
+        {
+            if (i + 1 >= tokens.size())
+            {
                 return "Error: " + tokens[i] + " operator missing filename";
             }
-            if (tokens[i + 1] == "<" |
 
-| tokens[i + 1] == ">" |
-| 
-                tokens[i + 1] == "|" |
-
-| tokens[i + 1] == "&") {
+            if (isOperator(tokens[i + 1]))
+            {
                 return "Error: " + tokens[i] + " operator followed by another operator";
+            }
+
+            if (tokens[i] == "<")
+            {
+                for (size_t j = i + 2; j < tokens.size(); j++)
+                {
+                    if (tokens[j] == "<")
+                    {
+                        return "Error: Multiple input redirections not supported";
+                    }
+                }
+            }
+            else if (tokens[i] == ">")
+            {
+                for (size_t j = i + 2; j < tokens.size(); j++)
+                {
+                    if (tokens[j] == ">")
+                    {
+                        return "Error: Multiple output redirections not supported";
+                    }
+                }
             }
         }
     }
     return "";
 }
 
-// ============== PIPE SPLITTING ==============
+// PIPE PARSING
 
-pair<vector<string>, vector<string>> split_pipe(const vector<string> &tokens) {
-    vector<string> cmd1, cmd2;
-    bool found_pipe = false;
-    
-    for (const auto &t : tokens) {
-        if (t == "|") {
-            if (found_pipe) return { {}, {} }; // Multiple pipes not supported in this basic version
-            found_pipe = true;
+pair<vector<string>, vector<string>> split_pipe(const vector<string> &tokens)
+{
+    vector<string> leftCmd, rightCmd;
+    bool pipeSeen = false;
+
+    for (const string &tok : tokens)
+    {
+        if (tok == "|")
+        {
+            if (pipeSeen)
+            {
+                cerr << "Error: Multiple pipes not supported\n";
+                return {{}, {}};
+            }
+            pipeSeen = true;
             continue;
         }
-        if (!found_pipe) cmd1.push_back(t);
-        else cmd2.push_back(t);
+
+        if (!pipeSeen)
+            leftCmd.push_back(tok);
+        else
+            rightCmd.push_back(tok);
     }
-    
-    return { cmd1, cmd2 };
+
+    return {leftCmd, rightCmd};
+}
+string trim(const string &s)
+{
+    size_t a = s.find_first_not_of(" \t\n\r");
+    if (a == string::npos)
+        return "";
+    size_t b = s.find_last_not_of(" \t\n\r");
+    return s.substr(a, b - a + 1);
 }
 
-// ============== HELPER: VECTOR TO CHAR* ARRAY ==============
-
-vector<char*> vec_to_char_array(vector<string> &args) {
-    vector<char*> argv;
-    for (auto &s : args) {
-        argv.push_back(&s);
-    }
-    argv.push_back(nullptr);
-    return argv;
-}
-
-// =============================================================
-
-int main() {
+int main()
+{
     ios::sync_with_stdio(false);
     cin.tie(nullptr);
-    
+
     setup_signal_handlers();
-    
+
     string line;
-    string prompt = "myshell> ";
-    
-    while (true) {
+    string prompt = "mysh> ";
+
+    while (true)
+    {
+        // showing prompt and flush asap
         cout << prompt << flush;
-        
-        if (!getline(cin, line)) {
+
+        if (!getline(cin, line))
+        {
             cout << "\n";
-            break; 
+            break;
         }
-        
-        // Tokenize
-        auto [toks, tok_error] = tokenize(line);
-        if (!tok_error.empty()) {
+
+        // triming leading/trailing spaces
+        string trimmed = trim(line);
+        if (trimmed.empty())
+            continue;
+
+        // token creation
+        auto [toks, tok_error] = tokenize(trimmed);
+        if (!tok_error.empty())
+        {
             cerr << tok_error << "\n";
             continue;
         }
-        if (toks.empty()) continue;
-        
-        // Check Background
+
+        if (toks.empty())
+            continue;
+
+        // background job detection
         bool background = false;
-        if (toks.back() == "&") {
+        if (!toks.empty() && toks.back() == "&")
+        {
             background = true;
             toks.pop_back();
-            if (toks.empty()) continue;
+            if (toks.empty())
+                continue;
         }
-        
-        // Validate Syntax
         string redir_error = validate_redirection(toks);
-        if (!redir_error.empty()) {
+        if (!redir_error.empty())
+        {
             cerr << redir_error << "\n";
             continue;
         }
-        
-        // Check Pipe
-        auto [cmd1_full, cmd2_full] = split_pipe(toks);
-        bool has_pipe =!cmd2_full.empty();
-        
-        // ============== BUILT-INS ==============
-        
-        // Fix: Check empty and use index 0
-        if (!cmd1_full.empty() && cmd1_full == "exit" &&!has_pipe) {
-            return 0;
-        }
-        
-        if (!cmd1_full.empty() && cmd1_full == "cd" &&!has_pipe) {
-            const char *path;
-            if (cmd1_full.size() > 1) path = cmd1_full.[1]c_str();
-            else path = getenv("HOME");
-            
-            if (chdir(path)!= 0) perror("cd");
+        auto [cmd1, cmd2] = split_pipe(toks);
+
+        if (cmd1.empty() && !toks.empty())
+        {
             continue;
         }
-        
-        // ============== EXECUTION ==============
-        
-        if (!has_pipe) {
-            // Single Command Logic
-            vector<string> cmd;
-            string input_file, output_file;
-            
-            for (size_t i = 0; i < cmd1_full.size(); i++) {
-                if (cmd1_full[i] == "<") {
-                    input_file = cmd1_full[++i];
-                } else if (cmd1_full[i] == ">") {
-                    output_file = cmd1_full[++i];
-                } else {
-                    cmd.push_back(cmd1_full[i]);
+
+        if (cmd2.empty())
+        {
+            cmd2 = cmd1;
+        }
+
+        bool has_pipe = (cmd2 != cmd1);
+
+        // cerr << "[DEBUG] Input: " << trimmed << "\n";
+        // cerr << "[DEBUG] Has pipe: " << (has_pipe ? "YES" : "NO") << "\n";
+        // cerr << "[DEBUG] Background: " << (background ? "YES" : "NO") << "\n";
+        if (toks[0] == "exit")
+        {
+            int code = 0;
+            if (toks.size() > 1)
+            {
+                code = stoi(toks[1]);
+            }
+            return code;
+        }
+
+        if (toks[0] == "cd")
+        {
+            const char *path;
+            if (toks.size() > 1)
+                path = toks[1].c_str();
+            else
+                path = getenv("HOME");
+
+            if (chdir(path) != 0)
+            {
+                perror("cd");
+            }
+            continue;
+        }
+
+        if (!has_pipe)
+        {
+            string input_file = "";
+            string output_file = "";
+            vector<string> cleaned;
+
+            for (int i = 0; i < (int)cmd1.size(); i++)
+            {
+                if (cmd1[i] == "<" && i + 1 < (int)cmd1.size())
+                {
+                    input_file = cmd1[i + 1];
+                    i++;
+                }
+                else if (cmd1[i] == ">" && i + 1 < (int)cmd1.size())
+                {
+                    output_file = cmd1[i + 1];
+                    i++;
+                }
+                else
+                {
+                    cleaned.push_back(cmd1[i]);
                 }
             }
-            
-            if (cmd.empty()) continue;
-            
+
+            cmd1 = cleaned;
+            if (cmd1.empty())
+                continue;
+
+            vector<char *> argv;
+            vector<string> storage;
+            storage.reserve(cmd1.size());
+            for (auto &s : cmd1)
+                storage.push_back(s);
+            for (auto &s : storage)
+                argv.push_back(&s[0]);
+            argv.push_back(nullptr);
+
             pid_t pid = fork();
-            if (pid < 0) {
+            if (pid < 0)
+            {
                 perror("fork");
                 continue;
             }
-            
-            if (pid == 0) {
-                // Child
-                signal(SIGINT, SIG_DFL); // Restore Ctrl-C
-                
-                if (!input_file.empty()) {
+
+            if (pid == 0)
+            {
+                signal(SIGINT, SIG_DFL);
+
+                if (!input_file.empty())
+                {
                     int fd = open(input_file.c_str(), O_RDONLY);
-                    if (fd < 0) { perror("input redirect"); _exit(1); }
+                    if (fd < 0)
+                    {
+                        perror("input redirection");
+                        _exit(1);
+                    }
                     dup2(fd, STDIN_FILENO);
                     close(fd);
                 }
-                
-                if (!output_file.empty()) {
-                    int fd = open(output_file.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd < 0) { perror("output redirect"); _exit(1); }
+
+                if (!output_file.empty())
+                {
+                    int fd = open(output_file.c_str(),
+                                  O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    if (fd < 0)
+                    {
+                        perror("output redirection");
+                        _exit(1);
+                    }
                     dup2(fd, STDOUT_FILENO);
                     close(fd);
                 }
-                
-                vector<char*> argv = vec_to_char_array(cmd);
-                execvp(argv, argv.data());
+
+                execvp(argv[0], argv.data());
                 perror("execvp");
                 _exit(1);
             }
-            
-            // Parent
-            if (!background) {
-                waitpid(pid, nullptr, 0);
-            } else {
-                cout << "[pid " << pid << "]\n";
+            else
+            {
+                if (!background)
+                {
+                    int status = 0;
+                    waitpid(pid, &status, 0);
+                }
+                else
+                {
+                    cout << "[background pid " << pid << "]\n";
+                }
             }
-            
-        } else {
-            // Pipeline Logic
-            int fds[2];
-            if (pipe(fds) < 0) { perror("pipe"); continue; }
-            
-            // Parse Left Command (cmd1)
-            vector<string> c1;
-            string c1_in;
-            for (size_t i = 0; i < cmd1_full.size(); i++) {
-                if (cmd1_full[i] == "<") c1_in = cmd1_full[++i];
-                else if (cmd1_full[i] == ">") i++; // Ignore output redirection in LHS of pipe
-                else c1.push_back(cmd1_full[i]);
-            }
-            
-            // Parse Right Command (cmd2)
-            vector<string> c2;
-            string c2_out;
-            for (size_t i = 0; i < cmd2_full.size(); i++) {
-                if (cmd2_full[i] == ">") c2_out = cmd2_full[++i];
-                else if (cmd2_full[i] == "<") i++; // Ignore input redirection in RHS of pipe
-                else c2.push_back(cmd2_full[i]);
-            }
-            
-            if (c1.empty() |
-
-| c2.empty()) {
-                cerr << "Invalid pipe syntax\n";
-                close(fds); close(fds[1]);
+        }
+        else
+        {
+            if (cmd1.empty() || cmd2.empty())
+            {
+                cerr << "Error: Pipe syntax requires two commands\n";
                 continue;
             }
 
-            // Fork Left
-            pid_t p1 = fork();
-            if (p1 == 0) {
+            int fds[2];
+            if (pipe(fds) < 0)
+            {
+                perror("pipe");
+                continue;
+            }
+
+            string input_file = "";
+            vector<string> cmd1_clean;
+            for (int i = 0; i < (int)cmd1.size(); i++)
+            {
+                if (cmd1[i] == "<" && i + 1 < (int)cmd1.size())
+                {
+                    input_file = cmd1[i + 1];
+                    i++;
+                }
+                else if (cmd1[i] != ">" && cmd1[i] != "|")
+                {
+                    cmd1_clean.push_back(cmd1[i]);
+                }
+            }
+            cmd1 = cmd1_clean;
+
+            string output_file = "";
+            vector<string> cmd2_clean;
+            for (int i = 0; i < (int)cmd2.size(); i++)
+            {
+                if (cmd2[i] == ">" && i + 1 < (int)cmd2.size())
+                {
+                    output_file = cmd2[i + 1];
+                    i++;
+                }
+                else if (cmd2[i] != "<" && cmd2[i] != "|")
+                {
+                    cmd2_clean.push_back(cmd2[i]);
+                }
+            }
+            cmd2 = cmd2_clean;
+
+            if (cmd1.empty() || cmd2.empty())
+            {
+                cerr << "Error: Pipe commands cannot be empty\n";
+                close(fds[0]);
+                close(fds[1]);
+                continue;
+            }
+
+            pid_t pid1 = fork();
+            if (pid1 < 0)
+            {
+                perror("fork");
+                close(fds[0]);
+                close(fds[1]);
+                continue;
+            }
+
+            if (pid1 == 0)
+            {
                 signal(SIGINT, SIG_DFL);
-                if (!c1_in.empty()) {
-                    int fd = open(c1_in.c_str(), O_RDONLY);
-                    if (fd < 0) { perror("input redirect"); _exit(1); }
+
+                dup2(fds[1], STDOUT_FILENO);
+                close(fds[0]);
+                close(fds[1]);
+
+                if (!input_file.empty())
+                {
+                    int fd = open(input_file.c_str(), O_RDONLY);
+                    if (fd < 0)
+                    {
+                        perror("input redirection");
+                        _exit(1);
+                    }
                     dup2(fd, STDIN_FILENO);
                     close(fd);
                 }
-                dup2(fds[1], STDOUT_FILENO); // Output to pipe
-                close(fds);
-                close(fds[1]);
-                
-                vector<char*> argv = vec_to_char_array(c1);
-                execvp(argv, argv.data());
-                perror("execvp c1");
+
+                vector<char *> argv;
+                vector<string> storage;
+                storage.reserve(cmd1.size());
+                for (auto &s : cmd1)
+                    storage.push_back(s);
+                for (auto &s : storage)
+                    argv.push_back(&s[0]);
+                argv.push_back(nullptr);
+
+                execvp(argv[0], argv.data());
+                perror("execvp");
                 _exit(1);
             }
-            
-            // Fork Right
-            pid_t p2 = fork();
-            if (p2 == 0) {
+
+            pid_t pid2 = fork();
+            if (pid2 < 0)
+            {
+                perror("fork");
+                close(fds[0]);
+                close(fds[1]);
+                continue;
+            }
+
+            if (pid2 == 0)
+            {
                 signal(SIGINT, SIG_DFL);
-                if (!c2_out.empty()) {
-                    int fd = open(c2_out.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                    if (fd < 0) { perror("output redirect"); _exit(1); }
+
+                dup2(fds[0], STDIN_FILENO);
+                close(fds[0]);
+                close(fds[1]);
+
+                if (!output_file.empty())
+                {
+                    int fd = open(output_file.c_str(),
+                                  O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                    if (fd < 0)
+                    {
+                        perror("output redirection");
+                        _exit(1);
+                    }
                     dup2(fd, STDOUT_FILENO);
                     close(fd);
                 }
-                dup2(fds, STDIN_FILENO); // Input from pipe
-                close(fds);
-                close(fds[1]);
-                
-                vector<char*> argv = vec_to_char_array(c2);
-                execvp(argv, argv.data());
-                perror("execvp c2");
+
+                vector<char *> argv;
+                vector<string> storage;
+                storage.reserve(cmd2.size());
+                for (auto &s : cmd2)
+                    storage.push_back(s);
+                for (auto &s : storage)
+                    argv.push_back(&s[0]);
+                argv.push_back(nullptr);
+
+                execvp(argv[0], argv.data());
+                perror("execvp");
                 _exit(1);
             }
-            
-            // Parent Close Pipe
-            close(fds);
+
+            close(fds[0]);
             close(fds[1]);
-            
-            if (!background) {
-                waitpid(p1, nullptr, 0);
-                waitpid(p2, nullptr, 0);
-            } else {
-                cout << "[pids " << p1 << " " << p2 << "]\n";
+
+            if (!background)
+            {
+                int status1, status2;
+                waitpid(pid1, &status1, 0);
+                waitpid(pid2, &status2, 0);
+            }
+            else
+            {
+                cout << "[background pipe pids " << pid1 << " " << pid2 << "]\n";
             }
         }
     }
+
     return 0;
 }
-
-
-
-
